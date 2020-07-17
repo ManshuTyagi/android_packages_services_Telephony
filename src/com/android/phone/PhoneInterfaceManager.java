@@ -260,6 +260,8 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
     private static final int EVENT_GET_MODEM_STATUS_DONE = 71;
     private static final int CMD_ERASE_MODEM_CONFIG = 72;
     private static final int EVENT_ERASE_MODEM_CONFIG_DONE = 73;
+    private static final int CMD_TOGGLE_2G = 998;
+    private static final int CMD_TOGGLE_3G = 999;
 
     // Parameters of select command.
     private static final int SELECT_COMMAND = 0xA4;
@@ -282,6 +284,7 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
     private SubscriptionController mSubscriptionController;
     private SharedPreferences mTelephonySharedPreferences;
     private PhoneConfigurationManager mPhoneConfigurationManager;
+    private int pNetwork;
 
     private static final String PREF_CARRIERS_ALPHATAG_PREFIX = "carrier_alphtag_";
     private static final String PREF_CARRIERS_NUMBER_PREFIX = "carrier_number_";
@@ -1237,6 +1240,70 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
      */
     private Object sendRequest(int command, Object argument, Integer subId) {
         return sendRequest(command, argument, subId, null, null);
+    }
+
+    public void toggle2G(boolean on) {
+        int network = -1;
+        final int phoneSubId = mSubscriptionController.getDefaultDataSubId();
+        Phone aphone = getPhone(phoneSubId);
+
+        if (on) {
+            if(phoneSubId != 0) {
+                pNetwork = android.provider.Settings.Global.getInt(mApp.getContentResolver(),
+                    android.provider.Settings.Global.PREFERRED_NETWORK_MODE + phoneSubId, 0);
+            } else {
+                pNetwork = android.provider.Settings.Global.getInt(mApp.getContentResolver(),
+                    android.provider.Settings.Global.PREFERRED_NETWORK_MODE, 0);
+            }
+            network = TelephonyManager.NETWORK_MODE_GSM_ONLY;
+        } else {
+            network = pNetwork;
+        }
+
+        aphone.setPreferredNetworkType(network,
+                mMainThreadHandler.obtainMessage(CMD_TOGGLE_2G));
+        if(phoneSubId != 0) {
+            android.provider.Settings.Global.putInt(mApp.getContentResolver(),
+                android.provider.Settings.Global.PREFERRED_NETWORK_MODE + phoneSubId, network);
+        } else {
+            android.provider.Settings.Global.putInt(mApp.getContentResolver(),
+                android.provider.Settings.Global.PREFERRED_NETWORK_MODE, network);
+        }
+
+        log("DefaultSubId: " + phoneSubId);
+        log("NetworkType: " + network);
+    }
+
+    public void toggle3G(boolean on) {
+        int network = -1;
+        final int phoneSubId = mSubscriptionController.getDefaultDataSubId();
+        Phone aphone = getPhone(phoneSubId);
+
+        if (on) {
+            if(phoneSubId != 0) {
+                pNetwork = android.provider.Settings.Global.getInt(mApp.getContentResolver(),
+                    android.provider.Settings.Global.PREFERRED_NETWORK_MODE + phoneSubId, 0);
+            } else {
+                pNetwork = android.provider.Settings.Global.getInt(mApp.getContentResolver(),
+                    android.provider.Settings.Global.PREFERRED_NETWORK_MODE, 0);
+            }
+            network = TelephonyManager.NETWORK_MODE_GSM_UMTS;
+        } else {
+            network = pNetwork;
+        }
+
+        aphone.setPreferredNetworkType(network,
+                mMainThreadHandler.obtainMessage(CMD_TOGGLE_3G));
+        if(phoneSubId != 0) {
+            android.provider.Settings.Global.putInt(mApp.getContentResolver(),
+                android.provider.Settings.Global.PREFERRED_NETWORK_MODE + phoneSubId, network);
+        } else {
+            android.provider.Settings.Global.putInt(mApp.getContentResolver(),
+                android.provider.Settings.Global.PREFERRED_NETWORK_MODE, network);
+        }
+
+        log("DefaultSubId: " + phoneSubId);
+        log("NetworkType: " + network);
     }
 
     /**
@@ -3592,7 +3659,8 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
      */
     @Override
     public int getDataNetworkType(String callingPackage) {
-        return getDataNetworkTypeForSubscriber(getDefaultSubscription(), callingPackage);
+        return getDataNetworkTypeForSubscriber(mSubscriptionController.getDefaultDataSubId(),
+                callingPackage);
     }
 
     /**
@@ -5420,15 +5488,25 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
     public boolean isRttEnabled(int subscriptionId) {
         final long identity = Binder.clearCallingIdentity();
         try {
+            int phoneId = SubscriptionManager.getPhoneId(subscriptionId);
+            if (!SubscriptionManager.isValidPhoneId(phoneId)) {
+                loge("phoneId " + phoneId + " is not valid.");
+                return false;
+            }
             boolean isRttSupported = isRttSupported(subscriptionId);
             boolean isUserRttSettingOn = Settings.Secure.getInt(
-                    mApp.getContentResolver(), Settings.Secure.RTT_CALLING_MODE, 0) != 0;
+                    mApp.getContentResolver(),
+                    Settings.Secure.RTT_CALLING_MODE + convertRttPhoneId(phoneId) , 0) != 0;
             boolean shouldIgnoreUserRttSetting = mApp.getCarrierConfigForSubId(subscriptionId)
                     .getBoolean(CarrierConfigManager.KEY_IGNORE_RTT_MODE_SETTING_BOOL);
             return isRttSupported && (isUserRttSettingOn || shouldIgnoreUserRttSetting);
         } finally {
             Binder.restoreCallingIdentity(identity);
         }
+    }
+
+    private static String convertRttPhoneId(int phoneId) {
+        return phoneId != 0 ? Integer.toString(phoneId) : "";
     }
 
     /**
@@ -5563,6 +5641,13 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
                     UserManager.DISALLOW_CONFIG_MOBILE_NETWORKS)) {
                 setUserDataEnabled(subId, getDefaultDataEnabled());
                 setNetworkSelectionModeAutomatic(subId);
+                // Set preferred mobile network type to the best available
+
+                String defaultNetworkMode = TelephonyManager.getTelephonyProperty(
+                        mSubscriptionController.getPhoneId(subId),
+                        "ro.telephony.default_network", null);
+                int networkType = !TextUtils.isEmpty(defaultNetworkMode)
+                        ? Integer.parseInt(defaultNetworkMode) : Phone.PREFERRED_NT_MODE;
                 setPreferredNetworkType(subId, getDefaultNetworkType(subId));
                 setDataRoamingEnabled(subId, getDefaultDataRoamingEnabled(subId));
                 CarrierInfoManager.deleteAllCarrierKeysForImsiEncryption(mApp);
@@ -6489,15 +6574,10 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
 
     @Override
     public List<UiccCardInfo> getUiccCardsInfo(String callingPackage) {
-        try {
-            PackageManager pm = mApp.getPackageManager();
-            if (Binder.getCallingUid() != pm.getPackageUid(callingPackage, 0)) {
-                throw new SecurityException("Calling package " + callingPackage + " does not match "
-                        + "calling UID");
-            }
-        } catch (PackageManager.NameNotFoundException e) {
-            throw new SecurityException("Invalid calling package. e=" + e);
-        }
+        // Verify that tha callingPackage belongs to the calling UID
+        mApp.getSystemService(AppOpsManager.class)
+                .checkPackage(Binder.getCallingUid(), callingPackage);
+
         boolean hasReadPermission = false;
         try {
             enforceReadPrivilegedPermission("getUiccCardsInfo");
